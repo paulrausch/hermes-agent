@@ -213,3 +213,14 @@ class OSSBackend(Mem0Backend):
             for obj in filter(None, (self._memory, vs, getattr(vs, "client", None))):
                 if hasattr(obj, "close"):
                     obj.close()
+            # The mem0 pgvector store has NO close(): its ThreadedConnectionPool is released only in
+            # __del__, which does not run before process exit. Reach the pool directly, on the store
+            # AND on any wrapped client, or a gateway restart leaks ~2 idle connections every time.
+            for holder in filter(None, (vs, getattr(vs, "client", None))):
+                pool = getattr(holder, "connection_pool", None)
+                if pool is None:
+                    continue
+                closer = getattr(pool, "closeall", None) or getattr(pool, "close", None)
+                if closer:
+                    with suppress(Exception):
+                        closer()
