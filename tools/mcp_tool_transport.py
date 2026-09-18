@@ -17,6 +17,7 @@ from tools.mcp_tool_common import _core
 from tools import mcp_tool_config as _config
 from tools import mcp_tool_lifecycle as _lifecycle
 from tools import mcp_tool_registration as _registration
+from tools.mcp_origin_headers import make_origin_request_hook as _make_origin_request_hook
 
 logger = logging.getLogger("tools.mcp_tool")
 
@@ -434,7 +435,15 @@ class MCPServerTransportMixin:
         inner_transport = httpx.AsyncHTTPTransport(verify=ssl_verify, **_present(cert=client_cert))
         client_kwargs: dict = {"follow_redirects": True, "timeout": httpx.Timeout(float(connect_timeout), read=300.0),
                                **({"headers": headers} if headers else {}),
-                               "event_hooks": {"response": [_strip_auth_on_cross_origin_redirect]},
+                               "event_hooks": {
+                                   "response": [_strip_auth_on_cross_origin_redirect],
+                                   # Per-call origin attestation: the hook stamps X-Origin-*
+                                   # onto the individual tools/call POST from
+                                   # self._pending_origin_headers. The shared client's own
+                                   # headers are never touched, so one conversation's
+                                   # identity cannot leak onto another's call.
+                                   "request": [_make_origin_request_hook(self)],
+                               },
                                "transport": _make_mcp_body_cap_transport(httpx, inner_transport),
                                **_present(mounts=_mcp_proxy_mounts(httpx, url, ssl_verify, client_cert, self.name),
                                           auth=oauth_auth)}

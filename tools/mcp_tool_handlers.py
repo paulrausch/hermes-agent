@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from tools.registry import tool_error
 from tools.ansi_strip import strip_unicode_tags
+from tools.mcp_origin_headers import mint_origin_headers_for_call as _mint_origin_headers_for_call
 from tools.mcp_tool_common import _exc_str, _sanitize_error, mcp_field, _core
 from tools import mcp_tool_loop as _loop
 from tools.mcp_tool_content import (
@@ -532,10 +533,20 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
         async def _call():
             async with server._rpc_lock, _track_inflight_rpc(server, server_name, op, retry_safe=read_only):
                 server._pending_call_context = contextvars.copy_context()  # for the elicitation callback
+                # Per-call origin attestation for the control-plane dispatch tool: mint fresh
+                # X-Origin-* headers from the trusted gateway session ContextVars (never from
+                # `args`) and hand them to the httpx request hook for THIS request only. A fresh
+                # nonce is minted per call — the plane spends each attestation once, so this must
+                # never be cached or replayed. No secret / no addressable identity => {} => zero
+                # headers sent.
+                server._pending_origin_headers = _mint_origin_headers_for_call(
+                    server_name, tool_name, args,
+                ) or None
                 try:
                     result = await _call_tool_racing_stdio_death(server, server_name, tool_name, args)
                 finally:
                     server._pending_call_context = None
+                    server._pending_origin_headers = None
             if getattr(server, "_mark_session_proven", None) is not None:  # round-trip done: transport healthy
                 server._mark_session_proven()
             return _render_call_tool_result(result, server_name)
