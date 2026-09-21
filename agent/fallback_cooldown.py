@@ -1,6 +1,7 @@
 """Primary rate-limit cooldown arming and per-session model rejection markers, shared by the
 fallback walk (chat_completion_helpers) and restore_primary_runtime (agent_runtime_helpers)."""
 import logging
+import os
 import time
 
 from agent.error_classifier import FailoverReason
@@ -8,6 +9,41 @@ from agent.error_classifier import FailoverReason
 logger = logging.getLogger(__name__)
 
 _RATE_LIMIT_FAILOVER_REASONS = frozenset({FailoverReason.rate_limit, FailoverReason.billing, FailoverReason.upstream_rate_limit})
+
+# Base cooldown for the FIRST consecutive rate-limit, doubling thereafter up to the cap.
+_DEFAULT_BACKOFF_BASE_S = 60
+_BACKOFF_CAP_S = 14400
+
+
+def _backoff_base_seconds() -> int:
+    """Base seconds for the primary rate-limit cooldown (doubles per consecutive 429).
+
+    The 60 s default is too quick when the exhausted thing is a long subscription window rather
+    than a momentary burst: the counter resets per session, so every NEW session's first fallback
+    announces "Primary retry eligible in ~60 s" and the gateway re-probes the primary all day
+    (Paul 2026-09-21 — "far too quick, should be 30 min").
+
+    Override per profile with ``model.rate_limit_backoff_base_seconds`` in config.yaml, or
+    ``HERMES_RATE_LIMIT_BACKOFF_BASE_S`` in the environment. Blank/non-positive/invalid values
+    keep the default, so nothing changes for profiles that do not opt in.
+    """
+    raw = (os.environ.get("HERMES_RATE_LIMIT_BACKOFF_BASE_S") or "").strip()
+    if not raw:
+        try:
+            from hermes_cli.config import cfg_get, load_config_readonly
+            cfg = load_config_readonly()
+            raw = str(cfg_get(cfg, "model", "rate_limit_backoff_base_seconds", default="") or "").strip()
+        except Exception:
+            raw = ""
+    if raw:
+        try:
+            value = int(float(raw))
+            if value > 0:
+                return value
+        except (TypeError, ValueError):
+            logger.warning("Ignoring invalid rate-limit backoff base %r; using %d s",
+                           raw, _DEFAULT_BACKOFF_BASE_S)
+    return _DEFAULT_BACKOFF_BASE_S
 
 
 def _arm_rate_limit_cooldown(agent, reason: "FailoverReason | None") -> int | None:
@@ -23,7 +59,7 @@ def _arm_rate_limit_cooldown(agent, reason: "FailoverReason | None") -> int | No
         return None
     backoff_count = getattr(agent, "_rate_limit_backoff_count", 0)
     agent._rate_limit_backoff_count = backoff_count + 1
-    backoff_seconds = min(60 * (2 ** backoff_count), 14400)
+    backoff_seconds = min(_backoff_base_seconds() * (2 ** backoff_count), _BACKOFF_CAP_S)
     agent._rate_limited_until = time.monotonic() + backoff_seconds
     logging.info("Rate-limit backoff level %d: cooldown %d s (%.1f min, backoff#%d)", backoff_count, backoff_seconds, backoff_seconds / 60, backoff_count + 1)
     return backoff_seconds
