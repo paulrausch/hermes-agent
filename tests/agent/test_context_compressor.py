@@ -2409,7 +2409,19 @@ class TestTruncateToolCallArgsJson:
         # Must parse — otherwise downstream provider returns 400
         parsed = _json.loads(shrunk)
         assert parsed["path"] == "~/.hermes/skills/shopping/browser-setup-notes.md"
-        assert parsed["content"].endswith("...[truncated]")
+        # write_file is an ARG-PAYLOAD tool: its content argument is EXEMPT from
+        # elision up to _ARG_EXEMPT_HARD_CAP (60k) — eliding it corrupted real
+        # writes, landing a truncated fragment on disk while write_file still
+        # reported success (restores 8adf333d1b). This payload (well under the
+        # cap) survives whole.
+        assert parsed["content"] == huge_content
+
+        # NOTE: the incoming commit (74c82ffcc2) also carried a
+        # TestTruncationMarkerNotImitable class testing _COMPRESSION_MARKER_PREFIX/
+        # _elided() — deliberately NOT restored here (see the matching note in
+        # agent/context_compressor.py): HEAD already has an independent, newer
+        # anti-imitation marker (marker_template, commit 262a6436fa) that this
+        # class does not test and whose helper functions no longer exist.
 
 
 class TestLazyContextResolution:
