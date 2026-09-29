@@ -755,6 +755,59 @@ class TestWebhookSilenceSuppression:
         assert result.success is True
         target.send.assert_not_awaited()
 
+    @pytest.mark.asyncio
+    async def test_marker_with_approval_id_is_delivered_without_marker(self):
+        """A marker never buys silence for something Paul must act on: the outbound gate
+        used to drop this to zero chars (``suppressed_actionable=True``)."""
+        adapter, target, chat_id = self._adapter_with_mock_target()
+
+        result = await adapter.send(chat_id, "Verified the deploy. Approve ap_1a2b3c4d to proceed. [SILENT]")
+
+        assert result.success is True
+        target.send.assert_awaited_once()
+        sent = target.send.await_args.args[1]
+        assert "ap_1a2b3c4d" in sent
+        assert "SILENT" not in sent.upper()
+
+    @pytest.mark.asyncio
+    async def test_marker_line_with_decision_ask_is_delivered(self):
+        adapter, target, chat_id = self._adapter_with_mock_target()
+
+        await adapter.send(chat_id, "[SILENT]\nI need your decision on whether the migration runs tonight.")
+
+        target.send.assert_awaited_once()
+        sent = target.send.await_args.args[1]
+        assert "decision" in sent and "SILENT" not in sent.upper()
+
+    @pytest.mark.asyncio
+    async def test_gate_off_backstop_still_delivers_actionable(self, monkeypatch):
+        """With the gate off, upstream's edge-line marker matcher is the only filter; it must
+        strip, not drop, an actionable reply, and still drop a plain one."""
+        monkeypatch.setenv("OUTBOUND_GATE_WAKE", "off")
+        adapter, target, chat_id = self._adapter_with_mock_target()
+
+        await adapter.send(chat_id, "[SILENT]\nNothing changed on the ticket.")
+        target.send.assert_not_awaited()
+
+        await adapter.send(chat_id, "[SILENT]\nPlease approve ap_9f8e7d6c before noon.")
+        target.send.assert_awaited_once()
+        sent = target.send.await_args.args[1]
+        assert "ap_9f8e7d6c" in sent and "SILENT" not in sent.upper()
+
+    @pytest.mark.asyncio
+    async def test_send_runs_the_outbound_gate(self, caplog):
+        """The gate is wired into the live send path (it was once only an untracked edit)."""
+        adapter, target, chat_id = self._adapter_with_mock_target()
+        adapter._delivery_info[chat_id]["event_type"] = "orchestration"
+
+        with caplog.at_level("INFO", logger="hermes.outbound_gate"):
+            await adapter.send(chat_id, "[SILENT]")
+
+        lines = [r.getMessage() for r in caplog.records if r.name == "hermes.outbound_gate"]
+        assert len(lines) == 1
+        assert "decision=suppress" in lines[0] and "rule=silent_marker" in lines[0]
+        assert "event_type=orchestration" in lines[0] and f"chat_id={chat_id}" in lines[0]
+
 
 # ===================================================================
 # Delivery info cleanup
