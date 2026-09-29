@@ -2003,10 +2003,7 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
                 f"({_fallback_reason_text(reason)}); using {fb_model} via {fb_provider}.")
             if cooldown_seconds is not None:
                 remaining = max(0, math.ceil(agent._rate_limited_until - time.monotonic()))
-                # Once the cooldown is long, seconds are noise — read it in minutes.
-                remaining_text = (f"~{remaining / 60:.0f} min" if remaining >= 120
-                                  else f"~{remaining} s")
-                notice += f" Primary retry eligible in {remaining_text}; recovery is not guaranteed."
+                notice += f" Primary retry eligible in ~{remaining} s; recovery is not guaranteed."
             _buffer_fallback_notice(agent, notice)
             # ``_fallback_activated`` is also reused by `/model --once` restoration; separate
             # provenance so the restore path only emits a recovery notice after a real fallback.
