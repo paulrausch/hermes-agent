@@ -34,6 +34,7 @@ except ImportError:
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, SendResult
 from gateway.platforms.event import MessageEvent, MessageType
+from gateway.platforms.outbound_gate import gate as outbound_gate, is_actionable, strip_silence_markers
 from gateway.platforms.webhook_coalesce import WebhookCoalescer, validate_coalesce_config
 from gateway.platforms.webhook_filters import DEFAULT_SCRIPT_TIMEOUT_SECONDS, WebhookRouteProcessor
 from gateway.response_filters import is_autonomous_silence_response
@@ -263,13 +264,22 @@ class WebhookAdapter(BasePlatformAdapter):
                    metadata: Optional[Dict[str, Any]] = None) -> SendResult:
         """Deliver the agent's response to the destination stored for ``chat_id``
         (``webhook:{route}:{delivery_id}``) — read with ``.get()``, never popped."""
-        # Autonomous lane (no human reader): the loose marker matcher shared with cron (marker on its own
-        # first/last line), because models add a sentence explaining why they stayed quiet, which the
-        # interactive exact-match rule would deliver.
-        if is_autonomous_silence_response(content):
-            logger.info("[webhook] Response for %s is a silence marker — not delivering", chat_id)
-            return SendResult(success=True)
         delivery = self._delivery_info.get(chat_id, {})
+        # Wake lane: the outbound gate decides silence / reformat. Actionable content (an ap_ id, an ask,
+        # a needs-you status) is never suppressed; its markers are stripped and the rest is delivered.
+        gate_decision = outbound_gate(content, event_type=delivery.get("event_type"),
+                                      context={"lane": "wake", "chat_id": chat_id})
+        if gate_decision.outgoing is None:
+            return SendResult(success=True)
+        content = gate_decision.outgoing
+        # Backstop when the gate is off / dry_run: the loose marker matcher shared with cron (marker on
+        # its own first/last line), because models add a sentence explaining why they stayed quiet. Same
+        # rule as the gate: a marker never buys silence for something Paul must act on.
+        if is_autonomous_silence_response(content):
+            if not is_actionable(content):
+                logger.info("[webhook] Response for %s is a silence marker — not delivering", chat_id)
+                return SendResult(success=True)
+            content = strip_silence_markers(content)
         deliver_type = delivery.get("deliver", "log")
         if deliver_type == "log":
             logger.info("[webhook] Response for %s: %s", chat_id, content[:200])
@@ -652,7 +662,7 @@ class WebhookAdapter(BasePlatformAdapter):
         # ``profile`` rides along so the reply leg (``send`` → ``_deliver_cross_platform``) egresses through
         # THIS profile's adapter, home channel and secrets — not the first profile that has the platform.
         self._delivery_info[session_chat_id] = {
-            "deliver": route_config.get("deliver", "log"), "profile": profile,
+            "deliver": route_config.get("deliver", "log"), "profile": profile, "event_type": event_type,
             "deliver_extra": self._render_delivery_extra(route_config.get("deliver_extra", {}), payload)}
         self._delivery_info_created[session_chat_id] = now
         self._delivery_info_order.append((now, session_chat_id))
